@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Secure Crypto Vault</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0d1117; /* Dark background */
+        }
+        .vault-card {
+            background-color: #161b22; /* Slightly lighter card background */
+            border: 1px solid #30363d;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+            transition: all 0.3s ease;
+        }
+        .vault-card:hover {
+            box-shadow: 0 15px 30px rgba(0, 0, 0, 0.7);
+        }
+        .key-input {
+            background-color: #0d1117;
+            border-color: #30363d;
+            color: #c9d1d9;
+        }
+        .key-input:focus {
+            border-color: #58a6ff;
+            box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.5);
+        }
+        .action-button {
+            transition: background-color 0.2s, transform 0.1s;
+        }
+        .action-button:active {
+            transform: scale(0.98);
+        }
+        /* Custom scrollbar for dark theme */
+        .vault-list::-webkit-scrollbar {
+            width: 8px;
+        }
+        .vault-list::-webkit-scrollbar-track {
+            background: #161b22;
+        }
+        .vault-list::-webkit-scrollbar-thumb {
+            background: #30363d;
+            border-radius: 4px;
+        }
+        .vault-list::-webkit-scrollbar-thumb:hover {
+            background: #58a6ff;
+        }
+    </style>
+</head>
+<body class="p-4 min-h-screen flex flex-col items-center">
+
+    <div id="app" class="w-full max-w-2xl mx-auto space-y-8 pb-10">
+
+        <!-- Header and User Info -->
+        <header class="text-center pt-6 pb-2">
+            <h1 class="text-3xl font-bold text-white tracking-tight">🔒 Secure Crypto Vault</h1>
+            <p class="text-sm text-gray-400 mt-2">Client-side AES-GCM encryption with Firestore.</p>
+        </header>
+
+        <!-- Loading/Error Indicator -->
+        <div id="statusMessage" class="hidden p-3 rounded-lg text-center font-medium" role="alert"></div>
+
+        <!-- Master Password Input Section -->
+        <div id="masterPasswordSection" class="vault-card p-6 rounded-xl space-y-4">
+            <h2 class="text-xl font-semibold text-white">1. Unlock Your Vault</h2>
+            <div id="authStatus" class="text-sm text-gray-500">Initializing database and authentication...</div>
+
+            <div class="flex flex-col sm:flex-row gap-3">
+                <input type="password" id="masterPasswordInput" placeholder="Enter Master Password" class="key-input w-full p-3 rounded-lg flex-grow" disabled>
+                <button id="unlockVaultButton" class="action-button bg-green-600 hover:bg-green-700 text-white font-semibold py-3 px-6 rounded-lg whitespace-nowrap disabled:opacity-50" disabled>Unlock Vault</button>
+            </div>
+            <p class="text-xs text-red-400">🚨 WARNING: This password is NOT stored. If you forget it, your encrypted data will be permanently inaccessible. It is used to generate the decryption key.</p>
+        </div>
+
+        <!-- Main Vault Content (Hidden until unlocked) -->
+        <div id="vaultContent" class="hidden space-y-8">
+            <div id="userIdDisplay" class="text-sm text-gray-400 p-3 rounded-lg bg-[#161b22] border border-[#30363d] overflow-x-auto">
+                User ID: <span class="font-mono text-blue-300 break-all" id="currentUserId"></span>
+            </div>
+
+            <!-- Add New Entry Form -->
+            <div class="vault-card p-6 rounded-xl space-y-4">
+                <h2 class="text-xl font-semibold text-white">2. Add New Entry (Encrypted)</h2>
+                <input type="text" id="entryName" placeholder="Name (e.g., Ledger Seed Phrase)" class="key-input w-full p-3 rounded-lg mb-2">
+                <select id="entryType" class="key-input w-full p-3 rounded-lg mb-2">
+                    <option value="seed">Seed Phrase (12/24 words)</option>
+                    <option value="key">Private Key (Hex/Base64)</option>
+                    <option value="api">Exchange API Key</option>
+                    <option value="other">Other Secret Text</option>
+                </select>
+                <textarea id="entryValue" rows="3" placeholder="Paste your sensitive value here..." class="key-input w-full p-3 rounded-lg resize-none"></textarea>
+                <button id="addEntryButton" class="action-button bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg w-full">Save Encrypted Entry</button>
+            </div>
+
+            <!-- Vault Entries List -->
+            <div class="vault-card p-6 rounded-xl space-y-4">
+                <h2 class="text-xl font-semibold text-white">3. Your Encrypted Entries</h2>
+                <div id="entriesList" class="space-y-3 vault-list max-h-96 overflow-y-auto">
+                    <!-- Entries will be dynamically inserted here -->
+                    <p class="text-gray-500 text-center py-4">Loading encrypted entries...</p>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Firebase SDK Imports -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, collection, onSnapshot, setDoc, deleteDoc, serverTimestamp, query, where } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        setLogLevel('Debug'); // Enable Firestore logging
+
+        // --- GLOBAL VARIABLES (Provided by Canvas Environment) ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // --- FIREBASE INITIALIZATION ---
+        let app, db, auth;
+        let userId = null;
+        let isAuthReady = false;
+
+        // --- CRYPTO KEY STORAGE ---
+        let encryptionKey = null; // Stores the derived AES key object in memory
+
+        const masterPasswordInput = document.getElementById('masterPasswordInput');
+        const unlockVaultButton = document.getElementById('unlockVaultButton');
+        const authStatus = document.getElementById('authStatus');
+        const vaultContent = document.getElementById('vaultContent');
+        const masterPasswordSection = document.getElementById('masterPasswordSection');
+        const statusMessage = document.getElementById('statusMessage');
+        const currentUserIdDisplay = document.getElementById('currentUserId');
+        const entriesList = document.getElementById('entriesList');
+        const addEntryButton = document.getElementById('addEntryButton');
+
+        // Helper to display transient status messages (like a toast/snackbar)
+        function showStatus(message, type = 'info') {
+            statusMessage.textContent = message;
+            statusMessage.className = 'p-3 rounded-lg text-center font-medium';
+            statusMessage.classList.remove('hidden', 'bg-red-700', 'bg-green-700', 'bg-yellow-600');
+
+            if (type === 'error') {
+                statusMessage.classList.add('bg-red-700', 'text-white');
+            } else if (type === 'success') {
+                statusMessage.classList.add('bg-green-700', 'text-white');
+            } else { // info
+                statusMessage.classList.add('bg-yellow-600', 'text-white');
+            }
+            statusMessage.classList.remove('hidden');
+
+            setTimeout(() => {
+                statusMessage.classList.add('hidden');
+            }, 5000);
+        }
+
+        // --- CRYPTOGRAPHY FUNCTIONS ---
+
+        // Converts an ArrayBuffer to a Base64 string
+        function arrayBufferToBase64(buffer) {
+            let binary = '';
+            const bytes = new Uint8Array(buffer);
+            const len = bytes.byteLength;
+            for (let i = 0; i < len; i++) {
+                binary += String.fromCharCode(bytes[i]);
+            }
+            return btoa(binary);
+        }
+
+        // Converts a Base64 string to an ArrayBuffer
+        function base64ToArrayBuffer(base64) {
+            const binary_string = atob(base64);
+            const len = binary_string.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {
+                bytes[i] = binary_string.charCodeAt(i);
+            }
+            return bytes.buffer;
+        }
+
+        /**
+         * Derives an AES-GCM key from a master password and salt (UID).
+         * @param {string} password - The master password string.
+         * @param {string} salt - The user's UID (used as salt).
+         * @returns {Promise<CryptoKey>} The derived AES key object.
+         */
+        async function deriveKey(password, salt) {
+            try {
+                // 1. Import password string as a CryptoKey
+                const enc = new TextEncoder();
+                const passwordKey = await crypto.subtle.importKey(
+                    'raw',
+                    enc.encode(password),
+                    { name: 'PBKDF2' },
+                    false,
+                    ['deriveKey']
+                );
+
+                // 2. Define PBKDF2 parameters
+                const saltBuffer = enc.encode(salt);
+                const pbkdf2Params = {
+                    name: 'PBKDF2',
+                    salt: saltBuffer,
+                    iterations: 100000, // High iteration count for security
+                    hash: 'SHA-256',
+                };
+
+                // 3. Derive the final AES-GCM key
+                const derivedKey = await crypto.subtle.deriveKey(
+                    pbkdf2Params,
+                    passwordKey,
+                    { name: 'AES-GCM', length: 256 },
+                    true,
+                    ['encrypt', 'decrypt']
+                );
+                return derivedKey;
+            } catch (error) {
+                console.error("Key derivation failed:", error);
+                throw new Error("Invalid password or key derivation error.");
+            }
+        }
+
+        /**
+         * Encrypts a string of data using the AES-GCM key.
+         * @param {string} data - The data string to encrypt.
+         * @param {CryptoKey} key - The AES-GCM key.
+         * @returns {Promise<{cipherText: string, iv: string}>} Encrypted data and IV, Base64 encoded.
+         */
+        async function encryptData(data, key) {
+            const enc = new TextEncoder();
+            const dataBuffer = enc.encode(data);
+            const iv = crypto.getRandomValues(new Uint8Array(16)); // 16-byte IV
+
+            const cipherBuffer = await crypto.subtle.encrypt(
+                { name: 'AES-GCM', iv: iv },
+                key,
+                dataBuffer
+            );
+
+            return {
+                cipherText: arrayBufferToBase64(cipherBuffer),
+                iv: arrayBufferToBase64(iv),
+            };
+        }
+
+        /**
+         * Decrypts an AES-GCM encrypted payload.
+         * @param {{cipherText: string, iv: string}} encryptedData - The encrypted payload.
+         * @param {CryptoKey} key - The AES-GCM key.
+         * @returns {Promise<string>} The decrypted string.
+         */
+        async function decryptData(encryptedData, key) {
+            try {
+                const cipherBuffer = base64ToArrayBuffer(encryptedData.cipherText);
+                const ivBuffer = base64ToArrayBuffer(encryptedData.iv);
+
+                const plainBuffer = await crypto.subtle.decrypt(
+                    { name: 'AES-GCM', iv: ivBuffer },
+                    key,
+                    cipherBuffer
+                );
+
+                const dec = new TextDecoder();
+                return dec.decode(plainBuffer);
+            } catch (error) {
+                console.error("Decryption failed:", error);
+                throw new Error("Decryption failed. Key or data is corrupt/invalid.");
+            }
+        }
+
+        // --- FIREBASE AUTH & INIT ---
+
+        function setupFirebase() {
+            try {
+                if (Object.keys(firebaseConfig).length === 0) {
+                    showStatus("Firebase configuration missing. Cannot proceed.", 'error');
+                    authStatus.textContent = 'Configuration Error.';
+                    return;
+                }
+
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        currentUserIdDisplay.textContent = userId;
+                        isAuthReady = true;
+                        authStatus.textContent = 'Authenticated. Enter Master Password to unlock.';
+                        masterPasswordInput.disabled = false;
+                        unlockVaultButton.disabled = false;
+                        console.log("Firebase Auth Ready. User ID:", userId);
+                    } else {
+                        // Attempt to sign in if no user is found
+                        try {
+                            if (initialAuthToken) {
+                                await signInWithCustomToken(auth, initialAuthToken);
+                            } else {
+                                await signInAnonymously(auth);
+                            }
+                        } catch (e) {
+                            showStatus(`Authentication error: ${e.message}`, 'error');
+                            authStatus.textContent = 'Authentication Failed.';
+                        }
+                    }
+                });
+            } catch (e) {
+                console.error("Firebase Initialization Error:", e);
+                showStatus(`Failed to initialize Firebase: ${e.message}`, 'error');
+            }
+        }
+
+        // --- EVENT HANDLERS ---
+
+        unlockVaultButton.addEventListener('click', async () => {
+            const password = masterPasswordInput.value;
+            if (!password || !userId) {
+                showStatus("Please enter a Master Password and ensure authentication is ready.", 'error');
+                return;
+            }
+
+            unlockVaultButton.disabled = true;
+            masterPasswordInput.disabled = true;
+            unlockVaultButton.textContent = 'Deriving Key...';
+
+            try {
+                // Derive the key using the password and the user's UID as salt
+                encryptionKey = await deriveKey(password, userId);
+
+                // Attempt to load and decrypt existing data to confirm the key is correct
+                // If it's a new user, this will just load an empty list.
+                // We trust the key derivation process.
+
+                vaultContent.classList.remove('hidden');
+                masterPasswordSection.classList.add('hidden');
+                showStatus("Vault Unlocked! Key derived successfully.", 'success');
+
+                // Start listening for real-time updates after successful unlock
+                setupRealtimeListener();
+
+            } catch (error) {
+                showStatus(`Failed to unlock vault: ${error.message}. Check your password.`, 'error');
+                encryptionKey = null; // Clear key on failure
+            } finally {
+                unlockVaultButton.textContent = 'Unlock Vault';
+                unlockVaultButton.disabled = false;
+                masterPasswordInput.disabled = false;
+            }
+        });
+
+        addEntryButton.addEventListener('click', async () => {
+            if (!encryptionKey) {
+                showStatus("Vault is locked. Please enter your Master Password first.", 'error');
+                return;
+            }
+
+            const name = document.getElementById('entryName').value.trim();
+            const type = document.getElementById('entryType').value;
+            const value = document.getElementById('entryValue').value.trim();
+
+            if (!name || !value) {
+                showStatus("Please provide a Name and a Value for the entry.", 'error');
+                return;
+            }
+
+            addEntryButton.disabled = true;
+            addEntryButton.textContent = 'Encrypting & Saving...';
+
+            try {
+                // 1. Encrypt the sensitive value
+                const encryptedData = await encryptData(value, encryptionKey);
+
+                // 2. Save the encrypted object to Firestore
+                const vaultCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/vault_entries`);
+                
+                await setDoc(doc(vaultCollectionRef), {
+                    name: name,
+                    type: type,
+                    // Store the encrypted payload (ciphertext + IV)
+                    encryptedPayload: encryptedData,
+                    createdAt: serverTimestamp(),
+                });
+
+                // Clear form inputs
+                document.getElementById('entryName').value = '';
+                document.getElementById('entryValue').value = '';
+                document.getElementById('entryType').value = 'seed'; // Reset to default
+
+                showStatus("Entry saved and encrypted successfully!", 'success');
+
+            } catch (error) {
+                console.error("Error saving entry:", error);
+                showStatus(`Error saving entry: ${error.message}. Check console for details.`, 'error');
+            } finally {
+                addEntryButton.disabled = false;
+                addEntryButton.textContent = 'Save Encrypted Entry';
+            }
+        });
+
+        // --- REAL-TIME DATA LISTENER ---
+
+        function setupRealtimeListener() {
+            if (!db || !userId) {
+                console.error("Database or User ID not ready for listener setup.");
+                return;
+            }
+
+            const vaultCollectionPath = `artifacts/${appId}/users/${userId}/vault_entries`;
+            const q = query(collection(db, vaultCollectionPath));
+
+            onSnapshot(q, (snapshot) => {
+                const entries = [];
+                snapshot.forEach((doc) => {
+                    entries.push({ id: doc.id, ...doc.data() });
+                });
+                renderEntries(entries);
+            }, (error) => {
+                console.error("Firestore snapshot error:", error);
+                if (error.code === 'permission-denied') {
+                    showStatus("Database permission denied. Check security rules.", 'error');
+                } else {
+                    showStatus("Error loading entries.", 'error');
+                }
+                entriesList.innerHTML = `<p class="text-red-500 text-center py-4">Error loading data: ${error.message}</p>`;
+            });
+        }
+
+        // --- UI RENDERING ---
+
+        async function renderEntries(entries) {
+            entriesList.innerHTML = '';
+            if (entries.length === 0) {
+                entriesList.innerHTML = `<p class="text-gray-500 text-center py-4">No entries found. Add one above!</p>`;
+                return;
+            }
+
+            for (const entry of entries) {
+                const entryDiv = document.createElement('div');
+                entryDiv.className = 'bg-[#0d1117] p-4 rounded-lg flex flex-col md:flex-row justify-between items-start md:items-center space-y-2 md:space-y-0 shadow-lg';
+                entryDiv.id = `entry-${entry.id}`;
+
+                const decryptedValueContainer = document.createElement('span');
+                decryptedValueContainer.className = 'text-red-400 font-mono text-sm break-all';
+                decryptedValueContainer.textContent = '*** ENCRYPTED DATA ***';
+
+                const decryptButton = document.createElement('button');
+                decryptButton.className = 'action-button bg-yellow-600 hover:bg-yellow-700 text-white font-semibold text-xs py-2 px-3 rounded-lg mr-2';
+                decryptButton.textContent = 'Decrypt';
+
+                // Delete button
+                const deleteButton = document.createElement('button');
+                deleteButton.className = 'action-button bg-red-600 hover:bg-red-700 text-white font-semibold text-xs py-2 px-3 rounded-lg';
+                deleteButton.textContent = 'Delete';
+                deleteButton.onclick = () => deleteEntry(entry.id, entry.name);
+
+                // Decrypt logic
+                decryptButton.onclick = async () => {
+                    if (!encryptionKey) {
+                        showStatus("Vault is locked. Cannot decrypt.", 'error');
+                        return;
+                    }
+                    decryptButton.disabled = true;
+                    decryptButton.textContent = 'Decrypting...';
+                    try {
+                        const decrypted = await decryptData(entry.encryptedPayload, encryptionKey);
+                        decryptedValueContainer.textContent = decrypted;
+                        decryptButton.textContent = 'Value Displayed';
+                        decryptButton.classList.remove('bg-yellow-600', 'hover:bg-yellow-700');
+                        decryptButton.classList.add('bg-gray-500');
+                        // Optional: Add a copy button after decryption
+                        const copyButton = document.createElement('button');
+                        copyButton.className = 'action-button bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs py-2 px-3 rounded-lg ml-2';
+                        copyButton.textContent = 'Copy';
+                        copyButton.onclick = () => {
+                            copyTextToClipboard(decrypted);
+                            copyButton.textContent = 'Copied!';
+                            setTimeout(() => copyButton.textContent = 'Copy', 2000);
+                        };
+                        decryptButton.replaceWith(copyButton); // Replace decrypt with copy button
+                    } catch (e) {
+                        showStatus("Decryption failed. Master Password might be incorrect or data is corrupt.", 'error');
+                        decryptedValueContainer.textContent = '!!! DECRYPTION ERROR !!!';
+                        decryptButton.textContent = 'Failed';
+                        decryptButton.disabled = true;
+                    }
+                };
+
+                const detailsHTML = `
+                    <div class="flex-grow">
+                        <div class="font-bold text-lg text-blue-400">${entry.name}</div>
+                        <div class="text-xs text-gray-500 mt-1 uppercase">${entry.type} Entry</div>
+                    </div>
+                `;
+
+                const actionsDiv = document.createElement('div');
+                actionsDiv.className = 'flex items-center';
+                actionsDiv.appendChild(decryptButton);
+                actionsDiv.appendChild(deleteButton);
+
+
+                entryDiv.innerHTML = detailsHTML;
+                entryDiv.querySelector('div').appendChild(decryptedValueContainer);
+                entryDiv.appendChild(actionsDiv);
+
+                entriesList.appendChild(entryDiv);
+            }
+        }
+
+        async function deleteEntry(id, name) {
+            if (!confirm(`Are you sure you want to delete the entry: ${name}? This action is permanent.`)) {
+                return;
+            }
+            try {
+                const docRef = doc(db, `artifacts/${appId}/users/${userId}/vault_entries`, id);
+                await deleteDoc(docRef);
+                showStatus(`Entry '${name}' deleted successfully.`, 'info');
+            } catch (error) {
+                console.error("Error deleting document: ", error);
+                showStatus(`Error deleting entry: ${error.message}`, 'error');
+            }
+        }
+
+        function copyTextToClipboard(text) {
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            textarea.style.position = 'fixed'; // Ensure it's not visible
+            document.body.appendChild(textarea);
+            textarea.select();
+            try {
+                document.execCommand('copy');
+                showStatus('Copied to clipboard!', 'success');
+            } catch (err) {
+                console.error('Failed to copy text: ', err);
+                showStatus('Failed to copy text. Please copy manually.', 'error');
+            }
+            document.body.removeChild(textarea);
+        }
+
+        // --- START APPLICATION ---
+        setupFirebase();
+
+    </script>
+</body>
+</html>
+
